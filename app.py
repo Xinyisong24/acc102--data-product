@@ -18,7 +18,7 @@ key accounting ratios, and a simple forecast.
 
 **Target users:** Beginner investors and accounting/finance students  
 **Analytical focus:** Profitability, leverage, earnings, and trend analysis  
-**Data source:** WRDS Compustat (sample fallback data is used if WRDS is unavailable)
+**Data source:** WRDS Compustat
 """)
 
 # ------------------- Sidebar -------------------
@@ -31,79 +31,54 @@ growth_rate = st.sidebar.slider("Annual Growth Rate (%)", 0.0, 20.0, 5.0)
 st.sidebar.markdown("""
 **Notes**
 - This tool is a simple MVP for educational use.
-- If WRDS is unavailable, the app will use sample fallback data.
+- WRDS credentials must be configured in Streamlit secrets.
 - This dashboard is not professional investment advice.
 """)
 
-# ------------------- WRDS Username -------------------
-# Recommended: store your WRDS username in Streamlit secrets
-# Example in .streamlit/secrets.toml:
+# ------------------- WRDS Credentials -------------------
+# Put these into Streamlit secrets:
 # wrds_username = "your_wrds_username"
+# wrds_password = "your_wrds_password"
 
-if "wrds_username" in st.secrets:
-    username = st.secrets["wrds_username"]
-else:
-    username = "your_wrds_username"  # Replace locally if needed
+wrds_username = st.secrets.get("wrds_username", "")
+wrds_password = st.secrets.get("wrds_password", "")
 
 # ------------------- Helper Functions -------------------
-def generate_sample_data(start_year):
-    np.random.seed(42)
-    years = list(range(start_year, 2024))
-    if len(years) == 0:
-        years =   [2023]
-
-    base_revenue = np.linspace(180, 380, len(years)) + np.random.uniform(-20, 20, len(years))
-    base_income = base_revenue * np.random.uniform(0.12, 0.22, len(years))
-    assets = np.linspace(350, 850, len(years)) + np.random.uniform(-40, 40, len(years))
-    liabilities = assets * np.random.uniform(0.28, 0.48, len(years))
-    stock_price = np.linspace(70, 220, len(years)) + np.random.uniform(-15, 15, len(years))
-    shares = np.random.uniform(12, 20, len(years))
-    roe = np.random.uniform(14, 28, len(years))
-
-    data = {
-        "Year": years,
-        "Revenue": base_revenue,
-        "Net_Income": base_income,
-        "ROE": roe,
-        "Total_Assets": assets,
-        "Total_Liabilities": liabilities,
-        "Stock_Price": stock_price,
-        "Shares_Outstanding": shares
-    }
-    return pd.DataFrame(data).round(2)
-
-
 def connect_wrds_school():
     if wrds is None:
-        st.warning("The wrds package is not installed. Using sample fallback data.")
-        return None
+        st.error("The wrds package is not installed. Please add 'wrds' to requirements.txt.")
+        st.stop()
 
-    if username == "your_wrds_username":
-        st.info("No WRDS username was provided. Using sample fallback data.")
-        return None
+    if not wrds_username:
+        st.error("WRDS username is missing. Please set 'wrds_username' in Streamlit secrets.")
+        st.stop()
+
+    if not wrds_password:
+        st.error("WRDS password is missing. Please set 'wrds_password' in Streamlit secrets.")
+        st.stop()
 
     try:
-        db = wrds.Connection(wrds_username=username)
+        try:
+            db = wrds.Connection(wrds_username=wrds_username, wrds_password=wrds_password)
+        except TypeError:
+            # Fallback for wrds package versions that do not accept wrds_password explicitly
+            db = wrds.Connection(wrds_username=wrds_username)
         return db
     except Exception as e:
         st.error(f"WRDS connection failed: {e}")
-        return None
+        st.stop()
 
 
 def load_data(ticker, start_year):
     db = connect_wrds_school()
 
-    if db is None:
-        st.warning("WRDS is unavailable. Using sample fallback data.")
-        return generate_sample_data(start_year), "Sample fallback data"
+    safe_ticker = "".join(ch for ch in ticker if ch.isalnum() or ch in [".", "-"]).upper()
 
-    safe_ticker = "".join(ch for ch in ticker if ch.isalnum() or ch in [".", "-"])
-
-    query = f"""
+    query = """
     SELECT fyear, revt, ni, roe, at, lt, prcc_f, csho
     FROM comp.funda
-    WHERE tic = '{safe_ticker}'
-      AND fyear >= {start_year}
+    WHERE UPPER(tic) = %(ticker)s
+      AND fyear >= %(start_year)s
       AND indfmt = 'INDL'
       AND datafmt = 'STD'
       AND popsrc = 'D'
@@ -112,34 +87,36 @@ def load_data(ticker, start_year):
     """
 
     try:
-        df = db.raw_sql(query)
+        df = db.raw_sql(
+            query,
+            params={"ticker": safe_ticker, "start_year": int(start_year)}
+        )
 
         if df.empty:
-            st.warning("No WRDS data found for the selected ticker and start year. Using sample fallback data.")
-            return generate_sample_data(start_year), "Sample fallback data"
+            st.error("No WRDS data found for the selected ticker and start year.")
+            st.stop()
 
-        df.columns = [
-            "Year",
-            "Revenue",
-            "Net_Income",
-            "ROE",
-            "Total_Assets",
-            "Total_Liabilities",
-            "Stock_Price",
-            "Shares_Outstanding"
-        ]
+        df = df.rename(columns={
+            "fyear": "Year",
+            "revt": "Revenue",
+            "ni": "Net_Income",
+            "roe": "ROE",
+            "at": "Total_Assets",
+            "lt": "Total_Liabilities",
+            "prcc_f": "Stock_Price",
+            "csho": "Shares_Outstanding"
+        })
 
         return df.round(2), "WRDS Compustat"
 
     except Exception as e:
         st.error(f"WRDS query failed: {e}")
-        st.warning("Using sample fallback data.")
-        return generate_sample_data(start_year), "Sample fallback data"
+        st.stop()
 
     finally:
         try:
             db.close()
-        except:
+        except Exception:
             pass
 
 
@@ -326,4 +303,4 @@ This dashboard is a small educational MVP. It provides a simple first-pass finan
 and should not be treated as professional investment advice.
 """)
 
-st.caption(f"Source note: {data_source}. If WRDS access fails, the app uses sample fallback data for demonstration.")
+st.caption(f"Source note: {data_source}.")
